@@ -7,13 +7,17 @@ FastAPI server for Bedrock Chat with MCP support
 """
 import os
 import sys
+import re
 import json
 import time
 import argparse
 import logging
 import asyncio
+import base64
+import mimetypes
+import hashlib
 from datetime import datetime, timedelta
-from typing import Dict, Any, List, Optional, Literal, AsyncGenerator
+from typing import Dict, Any, List, Optional, Literal, AsyncGenerator, Union
 import uuid
 import threading
 from contextlib import asynccontextmanager
@@ -89,7 +93,18 @@ def save_global_server_config( server_id: str, config: dict):
     global_mcp_server_configs[server_id] = config
     # 在实际应用中，这里应该将配置持久化到数据库或文件系统
     logger.info(f"保存Global服务器配置 {server_id}")
-    
+
+# 删除用户MCP服务器配置 
+def delete_user_server_config(user_id: str, server_id: str):
+    """删除用户的MCP服务器配置"""
+    global user_mcp_server_configs
+    with session_lock:
+        if user_id in user_mcp_server_configs and server_id in user_mcp_server_configs[user_id]:
+            del user_mcp_server_configs[user_id][server_id]
+            # 在实际应用中，这里应该从数据库或文件系统删除配置
+            logger.info(f"为用户 {user_id} 删除服务器配置 {server_id}")
+
+
 # 保存用户MCP服务器配置
 def save_user_server_config(user_id: str, server_id: str, config: dict):
     """保存用户的MCP服务器配置"""
@@ -230,10 +245,60 @@ async def cleanup_inactive_sessions():
         if inactive_users:
             logger.info(f"已清理 {len(inactive_users)} 个不活跃用户会话")
 
-            
+
+def hash_filename(filepath, algorithm='md5'):
+    """
+    对文件名进行哈希处理，但保留原始扩展名
+    """
+    filename = os.path.basename(filepath)
+    base, ext = os.path.splitext(filename)
+    
+    hash_obj = hashlib.md5(base.encode('utf-8'))
+    hashed_base = hash_obj.hexdigest()
+    
+    return hashed_base + ext
+
+def clean_filename(filename):
+    """清理文件名，只保留允许的字符，并移除连续空格"""
+    # 分离文件名和扩展名
+    name, ext = os.path.splitext(filename)
+    
+    # 只保留允许的字符（字母数字、空格、连字符、圆括号和方括号）
+    cleaned_name = re.sub(r'[^a-zA-Z0-9\s\-\(\)\[\]]', '', name)
+    
+    # 将连续的空格替换为单个空格
+    cleaned_name = re.sub(r'\s+', ' ', cleaned_name)
+    
+    # 返回清理后的文件名加扩展名
+    return cleaned_name + ext
+        
+class TextContent(BaseModel):
+    type: Literal["text"] = "text"
+    text: str
+
+class ImageUrl(BaseModel):
+    url: str
+    detail: Optional[str] = "auto"
+
+class ImageUrlContent(BaseModel):
+    type: Literal["image_url"] = "image_url"
+    image_url: ImageUrl
+
+class FileObject(BaseModel):
+    file_id: Optional[str] = None
+    file_data: Optional[str] = None
+    filename: Optional[str] = None
+
+class FileContent(BaseModel):
+    type: Literal["file"] = "file"
+    file: FileObject
+
+# Content can be either text, image_url, or file
+ContentPart = Union[TextContent, ImageUrlContent, FileContent]
+
 class Message(BaseModel):
     role: str
-    content: str
+    content: Union[str, List[ContentPart]]
 
 class ChatCompletionRequest(BaseModel):
     messages: List[Message]
@@ -354,6 +419,49 @@ async def list_mcp_server(
         "server_id": sid, 
         "server_name": name} for sid, name in server_list.items()]})
 
+@app.post("/v1/stop/stream/{stream_id}")
+async def stop_stream(
+    stream_id: str,
+    request: Request,
+    auth: HTTPAuthorizationCredentials = Security(security)
+):
+    """停止正在进行的模型输出流"""
+    global active_streams
+    # 获取用户会话
+    session = await get_or_create_user_session(request, auth)
+    user_id = session.user_id
+    
+    # 检查流是否存在且属于当前用户
+    authorized = True
+    if stream_id in active_streams:
+        if active_streams[stream_id] != user_id:
+            authorized = False
+    else:
+        # 流ID不在活跃列表中，但我们仍然尝试停止它
+        logger.warning(f"Stream {stream_id} not found in active_streams but still trying to stop it")
+    
+    if not authorized:
+        return JSONResponse(content={"errno": -1, "msg": "Not authorized to stop this stream"})
+    
+    # 调用流停止功能，即使流可能已经结束
+    try:
+        success = session.chat_client.stop_stream(stream_id)
+        
+        if success:
+            # 从活跃流列表中移除
+            if stream_id in active_streams:
+                del active_streams[stream_id]
+            return JSONResponse(content={"errno": 0, "msg": "Stream stopping initiated"})
+        else:
+            # 即使返回失败也尝试从活跃流列表中移除，防止僵尸流
+            if stream_id in active_streams:
+                del active_streams[stream_id]
+            logger.warning(f"Failed to stop stream {stream_id}")
+            return JSONResponse(content={"errno": 0, "msg": "Stream may have already completed"})
+    except Exception as e:
+        logger.error(f"Error stopping stream {stream_id}: {e}")
+        return JSONResponse(content={"errno": -1, "msg": f"Error stopping stream: {str(e)}"})
+
 @app.post("/v1/add/mcp_server")
 async def add_mcp_server(
     request: Request,
@@ -378,7 +486,7 @@ async def add_mcp_server(
         server_cmd = data.command
         server_script_args = data.args
         server_script_envs = data.env
-        server_desc = data.server_desc
+        server_desc = data.server_desc if data.server_desc else data.server_id
         
         # 处理配置JSON
         if data.config_json:
@@ -398,13 +506,21 @@ async def add_mcp_server(
             server_script_envs = config_json[server_id].get('env',{})
             
         # 连接MCP服务器
-        mcp_client = MCPClient(name=f"{session.user_id}_{server_id}")
+        tool_conf = {}
         try:
-            await mcp_client.connect_to_server(
+            # 创建客户端对象移到try块内
+            mcp_client = MCPClient(name=f"{session.user_id}_{server_id}")
+            
+            # 添加超时控制
+            connect_task = mcp_client.connect_to_server(
                 command=server_cmd,
                 server_script_args=server_script_args,
                 server_script_envs=server_script_envs
             )
+            
+            # 设置30秒超时
+            await asyncio.wait_for(connect_task, timeout=30.0)
+            
             tool_conf = await mcp_client.get_tool_config(server_id=server_id)
             logger.info(f"User {session.user_id} connected to MCP server {server_id}, tools={tool_conf}")
             
@@ -420,16 +536,33 @@ async def add_mcp_server(
             #save conf
             await save_user_mcp_configs()
             
-        except Exception as e:
-            tool_conf = {}
-            logger.error(f"User {session.user_id} connect to MCP server {server_id} error: {e}")
+            # 成功连接后才将客户端添加到用户会话
+            session.mcp_clients[server_id] = mcp_client
+            
+        except asyncio.TimeoutError:
+            logger.error(f"连接MCP服务器 {server_id} 超时")
+            # 清理超时的连接资源
+            try:
+                await mcp_client.cleanup()
+            except Exception as cleanup_error:
+                logger.error(f"清理超时连接资源失败: {cleanup_error}")
             return JSONResponse(content=AddMCPServerResponse(
                 errno=-1,
-                msg="MCP server connect failed!"
+                msg="MCP server connection timeout!"
+            ).model_dump())
+        except Exception as e:
+            logger.error(f"User {session.user_id} connect to MCP server {server_id} error: {e}")
+            # 清理失败的连接资源
+            try:
+                await mcp_client.cleanup()
+            except Exception as cleanup_error:
+                logger.error(f"清理失败连接资源出错: {cleanup_error}")
+            return JSONResponse(content=AddMCPServerResponse(
+                errno=-1,
+                msg=f"MCP server connect failed: {str(e)}"
             ).model_dump())
 
-        # 将客户端添加到用户会话
-        session.mcp_clients[server_id] = mcp_client
+        # 客户端已在成功连接后添加到用户会话
         # 更新全局服务器列表描述
         shared_mcp_server_list[server_id] = server_desc
         await save_user_mcp_configs()
@@ -451,44 +584,157 @@ async def remove_mcp_server(
     user_id = session.user_id
     
     # 使用会话锁确保操作是线程安全的
-    async with session.lock:
-        if server_id not in session.mcp_clients:
-            return JSONResponse(content=AddMCPServerResponse(
-                errno=-1,
-                msg="MCP server not found for this user!"
-            ).model_dump())
-            
-        try:
+    # async with session.lock:
+    if server_id not in session.mcp_clients:
+        return JSONResponse(content=AddMCPServerResponse(
+            errno=-1,
+            msg="MCP server not found for this user!"
+        ).model_dump())
+        
+    try:
+        async with session.lock:
             # 清理资源
             await session.mcp_clients[server_id].cleanup()
             # 移除服务器
             del session.mcp_clients[server_id]
-            
-            # 从用户配置中删除
-            if user_id in user_mcp_server_configs and server_id in user_mcp_server_configs[user_id]:
-                del user_mcp_server_configs[user_id][server_id]
-            
-            return JSONResponse(content=AddMCPServerResponse(
-                errno=0,
-                msg="Server removed successfully"
-            ).model_dump())
-            
-        except Exception as e:
-            logger.error(f"User {user_id} remove MCP server {server_id} error: {e}")
-            return JSONResponse(content=AddMCPServerResponse(
-                errno=-1,
-                msg=f"Failed to remove server: {str(e)}"
-            ).model_dump())
 
-async def stream_chat_response(data: ChatCompletionRequest, session: UserSession) -> AsyncGenerator[str, None]:
+            # 从用户配置中删除
+            delete_user_server_config(user_id, server_id)
+            #save conf
+            await save_user_mcp_configs()
+        # if user_id in user_mcp_server_configs and server_id in user_mcp_server_configs[user_id]:
+        #     del user_mcp_server_configs[user_id][server_id]
+            
+        
+        return JSONResponse(content=AddMCPServerResponse(
+            errno=0,
+            msg="Server removed successfully"
+        ).model_dump())
+        
+    except Exception as e:
+        logger.error(f"User {user_id} remove MCP server {server_id} error: {e}")
+        return JSONResponse(content=AddMCPServerResponse(
+            errno=-1,
+            msg=f"Failed to remove server: {str(e)}"
+        ).model_dump())
+
+# 活跃流式请求的字典，用于跟踪可以停止的请求
+active_streams = {}
+
+async def stream_chat_response(data: ChatCompletionRequest, session: UserSession, stream_id: str = None) -> AsyncGenerator[str, None]:
     """为特定用户生成流式聊天响应"""
-    messages = [{
-        "role": x.role,
-        "content": [{"text": x.content}],
-    } for x in data.messages]
+    # 注册流式请求，便于后续可能的停止操作
+    global active_streams
+    
+    # 注册流
+    if stream_id:
+        try:
+            # 先在ChatClientStream中注册流，然后再添加到active_streams
+            session.chat_client.register_stream(stream_id)
+            active_streams[stream_id] = session.user_id
+            logger.info(f"Stream {stream_id} registered for user {session.user_id}")
+        except Exception as e:
+            logger.error(f"Error registering stream {stream_id}: {e}")
+    # Process messages with possible structured content
+    messages = []
+    for file_idx, msg in enumerate(data.messages):
+        message_content = []
+        
+        # Handle string content (backward compatibility)
+        if isinstance(msg.content, str):
+            message_content = [{"text": msg.content}]
+        # Handle structured content (OpenAI format)
+        else:
+            for content_item in msg.content:
+                # Text content
+                if content_item.type == "text":
+                    message_content.append({"text": content_item.text})
+                
+                # Image content
+                elif content_item.type == "image_url":
+                    image_url = content_item.image_url.url
+                    
+                    # Handle base64 encoded images
+                    if image_url.startswith("data:image/"):
+                        try:
+                            # Parse data URI format: data:image/png;base64,ABC123...
+                            parts = image_url.split(";base64,")
+                            if len(parts) == 2:
+                                img_format = parts[0].split("/")[1]
+                                base64_data = parts[1]
+                                img_bytes = base64.b64decode(base64_data)
+                                
+                                message_content.append({
+                                    "image": {
+                                        "format": img_format,
+                                        "source": {
+                                            "bytes": img_bytes
+                                        }
+                                    }
+                                })
+                        except Exception as e:
+                            logger.error(f"Error processing base64 image: {e}")
+                    else:
+                        logger.warning(f"External image URLs not supported yet: {image_url}")
+                
+                # File content
+                elif content_item.type == "file":
+                    file_obj = content_item.file
+                    
+                    # Handle base64 encoded file data
+                    if file_obj.file_data:
+                        try:
+                            file_data = base64.b64decode(file_obj.file_data)
+                            filename = file_obj.filename or "unnamed_file"
+                            # Determine file format from filename or mime type
+                            file_ext = os.path.splitext(filename)[1].lower().replace(".", "")
+                            if not file_ext:
+                                file_ext = "txt"  # Default to txt if no extension
+                                
+                            # Map to Bedrock document format
+                            doc_format_map = {
+                                "pdf": "pdf",
+                                "csv": "csv", 
+                                "doc": "doc",
+                                "docx": "docx",
+                                "xls": "xls", 
+                                "xlsx": "xlsx",
+                                "html": "html",
+                                "txt": "txt",
+                                "md": "md",
+                                "json": "txt",  # JSON treated as text
+                                "xml": "txt",   # XML treated as text
+                                "py": "txt",    # Python file treated as text
+                                "js": "txt",    # JS file treated as text
+                                "ts": "txt",    # TS file treated as text
+                            }
+                            
+                            doc_format = doc_format_map.get(file_ext, "txt")
+                            
+                            message_content.append({
+                                "document": {
+                                    "format": doc_format,
+                                    "name": f"files_{file_idx}",
+                                    "source": {
+                                        "bytes": file_data
+                                    }
+                                }
+                            })
+                        except Exception as e:
+                            logger.error(f"Error processing file data: {e}")
+                    
+                    # Handle file_id (not implemented in this version)
+                    elif file_obj.file_id:
+                        logger.warning(f"File ID references not implemented yet: {file_obj.file_id}")
+        
+        messages.append({
+            "role": msg.role,
+            "content": message_content
+        })
+    
     system = []
     if messages and messages[0]['role'] == 'system':
-        system = [{"text":messages[0]['content'][0]["text"]}] if messages[0]['content'][0]["text"] else []
+        system = messages[0]['content'] if messages[0]['content'] else []
         messages = messages[1:]
 
     # bedrock's first turn cannot be assistant
@@ -511,6 +757,7 @@ async def stream_chat_response(data: ChatCompletionRequest, session: UserSession
                 mcp_clients=session.mcp_clients,
                 mcp_server_ids=data.mcp_server_ids,
                 extra_params=data.extra_params,
+                stream_id=stream_id,
                 ):
             
             event_data = {
@@ -566,6 +813,23 @@ async def stream_chat_response(data: ChatCompletionRequest, session: UserSession
             # 发送事件
             yield f"data: {json.dumps(event_data)}\n\n"
 
+            # 手动停止流式响应
+            if response["type"] == "stopped":
+                event_data = {
+                    "id": f"stop{time.time_ns()}",
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": data.model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop_requested"
+                    }]
+                }
+                yield f"data: {json.dumps(event_data)}\n\n"
+                yield "data: [DONE]\n\n"
+                break
+
             # 发送结束标记
             if response["type"] == "message_stop" and response["data"]["stopReason"] == 'end_turn':
                 yield "data: [DONE]\n\n"
@@ -585,6 +849,18 @@ async def stream_chat_response(data: ChatCompletionRequest, session: UserSession
         }
         yield f"data: {json.dumps(error_data)}\n\n"
         yield "data: [DONE]\n\n"
+        
+    finally:
+        # 清除活跃流列表中的请求
+        try:
+            if stream_id:
+                # 清理同步：先从ChatClientStream中删除，再从active_streams中删除
+                session.chat_client.unregister_stream(stream_id)
+                if stream_id in active_streams:
+                    del active_streams[stream_id]
+                    logger.info(f"Stream {stream_id} unregistered")
+        except Exception as e:
+            logger.error(f"Error cleaning up stream {stream_id}: {e}")
 
 @app.post("/v1/chat/completions")
 async def chat_completions(
@@ -613,16 +889,111 @@ async def chat_completions(
 
     # 处理流式请求
     if data.stream:
+        # 为流式请求生成唯一ID
+        stream_id = f"stream_{session.user_id}_{time.time_ns()}"
         return StreamingResponse(
-            stream_chat_response(data, session),
-            media_type="text/event-stream"
+            stream_chat_response(data, session, stream_id),
+            media_type="text/event-stream",
+            headers={"X-Stream-ID": stream_id}  # 添加流ID到响应头，便于前端跟踪
         )
 
     # 处理非流式请求
-    messages = [{
-        "role": x.role,
-        "content": [{"text": x.content}],
-    } for x in data.messages]
+    messages = []
+    for file_idx, msg in enumerate(data.messages):
+        message_content = []
+        
+        # Handle string content (backward compatibility)
+        if isinstance(msg.content, str):
+            message_content = [{"text": msg.content}]
+        # Handle structured content (OpenAI format)
+        else:
+            for content_item in msg.content:
+                # Text content
+                if content_item.type == "text":
+                    message_content.append({"text": content_item.text})
+                
+                # Image content
+                elif content_item.type == "image_url":
+                    image_url = content_item.image_url.url
+                    
+                    # Handle base64 encoded images
+                    if image_url.startswith("data:image/"):
+                        try:
+                            # Parse data URI format: data:image/png;base64,ABC123...
+                            parts = image_url.split(";base64,")
+                            if len(parts) == 2:
+                                img_format = parts[0].split("/")[1]
+                                base64_data = parts[1]
+                                img_bytes = base64.b64decode(base64_data)
+                                
+                                message_content.append({
+                                    "image": {
+                                        "format": img_format,
+                                        "source": {
+                                            "bytes": img_bytes
+                                        }
+                                    }
+                                })
+                        except Exception as e:
+                            logger.error(f"Error processing base64 image: {e}")
+                    else:
+                        logger.warning(f"External image URLs not supported yet: {image_url}")
+                
+                # File content
+                elif content_item.type == "file":
+                    file_obj = content_item.file
+                    
+                    # Handle base64 encoded file data
+                    if file_obj.file_data:
+                        try:
+                            file_data = base64.b64decode(file_obj.file_data)
+                            filename = file_obj.filename or "unnamed_file"
+                            filename = hash_filename(filename)
+                            # Determine file format from filename or mime type
+                            file_ext = os.path.splitext(filename)[1].lower().replace(".", "")
+                            if not file_ext:
+                                file_ext = "txt"  # Default to txt if no extension
+                                
+                            # Map to Bedrock document format
+                            doc_format_map = {
+                                "pdf": "pdf",
+                                "csv": "csv", 
+                                "doc": "doc",
+                                "docx": "docx",
+                                "xls": "xls", 
+                                "xlsx": "xlsx",
+                                "html": "html",
+                                "txt": "txt",
+                                "md": "md",
+                                "json": "txt",  # JSON treated as text
+                                "xml": "txt",   # XML treated as text
+                                "py": "txt",    # Python file treated as text
+                                "js": "txt",    # JS file treated as text
+                                "ts": "txt",    # TS file treated as text
+                            }
+                            
+                            doc_format = doc_format_map.get(file_ext, "txt")
+                            
+                            message_content.append({
+                                "document": {
+                                    "format": doc_format,
+                                    "name": f"file_{file_idx}",
+                                    "source": {
+                                        "bytes": file_data
+                                    }
+                                }
+                            })
+                        except Exception as e:
+                            logger.error(f"Error processing file data: {e}")
+                    
+                    # Handle file_id (not implemented in this version)
+                    elif file_obj.file_id:
+                        logger.warning(f"File ID references not implemented yet: {file_obj.file_id}")
+        
+        messages.append({
+            "role": msg.role,
+            "content": message_content
+        })
 
     # bedrock's first turn cannot be assistant
     if messages and messages[0]['role'] == 'assistant':
@@ -630,7 +1001,7 @@ async def chat_completions(
 
     system = []
     if messages and messages[0]['role'] == 'system':
-        system = [{"text":messages[0]['content'][0]["text"]}] if messages[0]['content'][0]["text"] else []
+        system = messages[0]['content'] if messages[0]['content'] else []
         messages = messages[1:]
 
     try:

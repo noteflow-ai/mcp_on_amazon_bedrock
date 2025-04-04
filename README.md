@@ -1,4 +1,6 @@
 # MCP on Amazon Bedrock[[English Readme](./README.en.md)]
+- Demo Vides
+![alt text](assets/demo_videos.png)
 
 > ChatBot 是大模型时代最常见的应用形态，但受限于大模型无法获取及时信息、无法操作外部系统等，使得 ChatBot 应用场景相对有限。后来随着 Function Calling/Tool Use 功能推出，大模型能够跟外部系统交互，但弊端在于大模型业务逻辑和 Tool 开发都是紧密耦合的，无法发挥出 Tool 端规模化的效率。Anthropic 2024 年 11 月底推出 [MCP](https://www.anthropic.com/news/model-context-protocol) 打破了这一局面，引入整个社区的力量在 Tool 端规模化发力，目前已经有开源社区、各路厂商等开发了丰富的 [MCP server](https://github.com/modelcontextprotocol/servers)，使得 Tool 端蓬勃发展。终端用户即插即用就可将其集成到自己的 ChatBot 中，极大延展了 ChatBot UI 的能力，有种 ChatBot 一统各种系统 UI 的趋势。
 - MCP 如何工作  
@@ -56,7 +58,6 @@
    - 同时支持Amazon Nova Pro和Claude Sonnet模型
    - 与Anthropic官方MCP标准完全兼容，可以采用同样的方式，直接使用社区的各种[MCP servers](https://github.com/modelcontextprotocol/servers/tree/main)
    - 将MCP能力和客户端的解耦，MCP能力封装在服务端，对外提供API服务，且chat接口兼容openai，方便接入其他chat客户端
-    ![alt text](./assets/image_api.png)
    - 前后端分离，MCP Client和MCP Server均可以部署到服务器端，用户可以直接使用web浏览器通过后端web服务交互，从而访问LLM和MCP Sever能力和资源  
    - 支持多用户，用户session隔离，支持并发访问。
    - 流式响应
@@ -167,7 +168,22 @@ curl http://127.0.0.1:7002/v1/chat/completions \
   }'
 ```
 
-### 3.3.ChatBot UI 
+### 3.3  (🚀 New) React UI
+- 🚀 基于Next.js 15和React 18构建的现代化前端，支持Dark/Light模式
+- 🎨 使用Tailwind CSS和Shadcn UI组件库实现美观的用户界面
+- 🔄 实时流式响应，提供流畅的对话体验
+- 🧠 支持"思考"模式，展示模型的推理过程
+- 🛠️ MCP服务器管理功能，支持添加和配置服务器
+- 👤 用户会话管理，保持对话上下文
+- 📊 可视化工具使用结果，包括图像显示
+- 📱 支持多模态输入，包括图片，pdf，文档等附件上传
+- [安装步骤](react_ui/README.md)
+![alt text](react_ui/image.png)
+![alt text](react_ui/image-1.png)
+
+
+
+#### ChatBot UI 
 待启动后，可查看日志 `logs/start_chatbot.log` 确认无报错，然后浏览器打开[服务地址](http://localhost:8502/)，即可体验 MCP 增强后的 Bedrock 大模型 ChatBot 能力。
 由于已内置了文件系统操作、SQLite 数据库等 MCP Server，可以尝试连续提问以下问题进行体验：
 
@@ -187,8 +203,7 @@ read the content of rows.txt file
 下面演示如何通过 ChatBot UI 添加 MCP Server，这里以 Web Search 供应商 [Exa](https://exa.ai/) 为例，开源社区已有针对它的 [MCP Server](https://github.com/exa-labs/exa-mcp-server) 可用。  
 首先，前往 [Exa](https://exa.ai/) 官网注册账号，并获取 API Key。  
 然后点击【添加 MCP Server】，在弹出菜单中填写如下参数并提交即可：  
-- 方式1，直接添加MCP json 配置文件(与Anthropic官方格式相同)  
-![](assets/add_mcp_server2.png)  
+- 方式1，直接添加MCP json 配置文件(与Anthropic官方格式相同)   
 ```json
 {
   "mcpServers": {
@@ -203,7 +218,6 @@ read the content of rows.txt file
 }
 ```
 - 方式2，按字段添加 
-![](assets/add_mcp_server.png)  
 
 此时在已有 MCP Server 列表中就可以看到新添加项，勾选即可启动该 MCP Server。
 
@@ -212,41 +226,44 @@ read the content of rows.txt file
 
 ## 5 Demo cases
 ### 5.1.使用MCP操作Browser浏览器 
-- 先安装 MCP-browser，注意：如果在本地部署这个demo可以可视化看到浏览器自动运行效果。如果是在服务器上部署，则需要修改成浏览器无头模式。
-找一个目录中下载
-```bash
-git clone https://github.com/xiehust/mcp-browser-automation.git
-cd mcp-browser-automation
-# 使用npm命令编译安装
-npm install
-npm install @playwright/test
-npx playwright install 
-```  
-- 注意服务器上部署，则需要修改成浏览器无头模式，修改mcp-browser-automation/src/toolsHandler.ts中headless:true,
-再运行npm install
-```ts
-browser = await chromium.launch({ headless: true });
-```
-
-- 然后在chatbot界面上添加这个json文件，注意args中的/path_to/路径
+- 在chatbot界面上添加这个json文件,注意：这个[browser use](https://github.com/vinayak-mehta/mcp-browser-use)server默认启动有头模式的浏览器，因此适合在本地电脑部署的demo中，如果在服务器端部署，请在提示词里加一句`use headless is true to initialize the browser`
+**注意** 第一次运行时，需要在服务安装对应的依赖包 `sudo apt-get install libgbm1`  
 ```json
 { "mcpServers": 
 	{ "mcp-browser": 
-		{ "command": "node", "args": ["/path_to/mcp-browser-automation/dist/index.js"] 
+		{ "command": "uvx", 
+        "args": ["mcp-browser-use"],
+        "env": {},
+        "description": "mcp-browser"
 		} 
 	} 
 }
+```  
+
+- **New added 20250331** 使用MS官方[playwright](https://mcp.so/server/playwright-mcp/microsoft):   
+**注意** 如果需要无头模式则添加"--headless"参数，第一次运行时，需要在服务安装对应的依赖包 `npx playwright install chrome`  
+```json
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest",
+        "--headless"
+      ]
+    }
+  }
+}
 ```
+
 - test 1, 在chatbot界面中，勾选mcp-browser和local file system 2个server  
-system prompt输入：`when you use mcp browser, If you need to visit search engine, please visit www.bing.com, do not visit google.`  
-输入任务：`帮我整理一份关于小米SU7 ultra的介绍，包括性能，价格，特色功能，图文并茂，并制作成精美的HTML保存到本地目录中`  
+输入任务：`帮我整理一份关于小米SU7 ultra的介绍，包括性能，价格，特色功能，图文并茂，并制作成精美的HTML保存到本地目录中.如果引用了其他网站的图片，确保图片真实存在，并且可以访问。`  
 [视频demo](https://mp.weixin.qq.com/s/csg7N8SHoIR2WBgFOjpm6A)  
 [最终输出文件示例](docs/xiaomi_su7_ultra_intro.html)  
   - 如果第一次运行可能需要额外安装一些软件，请跟进tool call 返回的信息提示安装即可  
 
 - test 2, 在chatbot界面中，勾选exa,mcp-browser和local file system 3个server, 会结合搜索引擎，浏览器共同获取信息和图片，形成更丰富的报告
-system prompt输入：`when you use mcp browser, If you need to visit search engine, please visit www.bing.com, do not visit google.`  
-输入任务：`我想要一份特斯拉股票的全面分析，包括：概述：公司概况、关键指标、业绩数据和投资建议财务数据：收入趋势、利润率、资产负债表和现金流分析市场情绪：分析师评级、情绪指标和新闻影响技术分析：价格趋势、技术指标和支撑/阻力水平资产比较：市场份额和与主要竞争对手的财务指标对比价值投资者：内在价值、增长潜力和风险因素投资论点：SWOT 分析和针对不同类型投资者的建议。 并制作成精美的HTML保存到本地目录中。 你可以使用mcp-browser和exa search去获取尽可能丰富的实时数据和图片。`   
+输入任务：`我想要一份特斯拉股票的全面分析，包括：概述：公司概况、关键指标、业绩数据和投资建议财务数据：收入趋势、利润率、资产负债表和现金流分析市场情绪：分析师评级、情绪指标和新闻影响技术分析：价格趋势、技术指标和支撑/阻力水平资产比较：市场份额和与主要竞争对手的财务指标对比价值投资者：内在价值、增长潜力和风险因素投资论点：SWOT 分析和针对不同类型投资者的建议。 并制作成精美的HTML保存到本地目录中。如果引用了其他网站的图片，确保图片真实存在，并且可以访问。 你可以使用mcp-browser和exa search去获取尽可能丰富的实时数据和图片。`   
 [最终输出文件示例](docs/tesla_stock_analysis.html)  
 
 - **时序图1:使用Headless Browser 的 MCP Server**
@@ -255,9 +272,9 @@ system prompt输入：`when you use mcp browser, If you need to visit search eng
 ### 5.2 使用MCP Computer Use 操作 EC2 remote desktop
 - 在另外一个目录中安装下载remote-computer-use
 ```bash
-git clone https://github.com/xiehust/sample-mcp-servers.git
+git clone https://github.com/aws-samples/aws-mcp-servers-samples.git
 ```
-- 需要提前安装一台EC2实例，并配置VNC远程桌面。安装步骤请参考[说明](https://github.com/xiehust/sample-mcp-servers/blob/main/remote_computer_use/README.md)
+- 需要提前安装一台EC2实例，并配置VNC远程桌面。安装步骤请参考[说明](https://github.com/aws-samples/aws-mcp-servers-samples/blob/main/remote_computer_use/README.md)
 - 环境配置好之后，在MCP demo客户端配置如下：
 ```json
 {
@@ -283,46 +300,17 @@ git clone https://github.com/xiehust/sample-mcp-servers.git
     }
 }
 ```
-- 使用Computer Use推荐用Claude 3.7模型，并添加如下system prompt
-```
-You are an expert research assistant with deep analytical skills. When presented with a task, follow this structured approach:
+- 使用Computer Use推荐用Claude 3.7模型，并添加如下system prompt  
 
-<GUIDANCE>
-1. First, carefully analyze the user's task to understand its requirements and scope.
-2. Create a comprehensive research plan organized as a detailed todo list following this specific format:
-
-   ```markdown
-   # [Brief Descriptive Title]
- 
-   ## Phases
-   1. **[Phase Name 1]**
-      - [ ] Task 1
-      - [ ] Task 2
-      - [ ] Task 3
- 
-   2. **[Phase Name 2]**
-      - [ ] Task 1
-      - [ ] Task 2
-   ```
-
-3. As you progress, update the todo list by:
-   - Marking completed tasks with [x] instead of [ ]
-   - Striking through unnecessary tasks using ~~text~~ markdown syntax
- 
-4. Save this document to the working directory `/home/ubuntu/Documents/` as `todo_list_[brief_descriptive_title].md` using the available file system tools.
-5. Execute the plan methodically, addressing each phase in sequence.
-6. Continuously evaluate progress, update task status, and refine the plan as needed based on findings.
-7. Provide clear, well-organized results that directly address the user's original request.
-</GUIDANCE>
-
+```plaintext
+You are an expert research assistant with deep analytical skills.
 <IMPORTANT>
-* Don't assume an application's coordinates are on the screen unless you saw the screenshot. To open an application, please take screenshot first and then find out the coordinates of the application icon. 
-* When using Firefox, if a startup wizard or Firefox Privacy Notice appears, IGNORE IT.  Do not even click "skip this step".  Instead, click on the address bar where it says "Search or enter address", and enter the appropriate search term or URL there. Maximize the Firefox browser window to get wider vision.
-* If the item you are looking at is a pdf, if after taking a single screenshot of the pdf it seems that you want to read the entire document instead of trying to continue to read the pdf from your screenshots + navigation, determine the URL, use curl to download the pdf, install and use pdftotext to convert it to a text file, and then read that text file directly with your StrReplaceEditTool.
-* After each step, take a screenshot and carefully evaluate if you have achieved the right outcome. Explicitly show your thinking: "I have evaluated step X..." If not correct, try again. Only when you confirm a step was executed correctly should you move on to the next one.
+  * Don't assume an application's coordinates are on the screen unless you saw the screenshot. To open an application, please take screenshot first and then find out the coordinates of the application icon. 
+  * When using Firefox, if a startup wizard or Firefox Privacy Notice appears, IGNORE IT.  Do not even click "skip this step".  Instead, click on the address bar where it says "Search or enter address", and enter the appropriate search term or URL there. Maximize the Firefox browser window to get wider vision.
+  * If the item you are looking at is a pdf, if after taking a single screenshot of the pdf it seems that you want to read the entire document instead of trying to continue to read the pdf from your screenshots + navigation, determine the URL, use curl to download the pdf, install and use pdftotext to convert it to a text file, and then read that text file directly with your StrReplaceEditTool.
+  * After each step, take a screenshot and carefully evaluate if you have achieved the right outcome. Explicitly show your thinking: "I have evaluated step X..." If not correct, try again. Only when you confirm a step was executed correctly should you move on to the next one.
 </IMPORTANT>
-
-```
+```   
 
 - **时序图:使用Computer Use 操作 EC2 Remote Desktop**  
 ![alt text](assets/image-seq3.png)
@@ -375,8 +363,8 @@ docker build -t mcp/aws-kb-retrieval:latest -f src/aws-kb-retrieval-server/Docke
 }
 ```
 
-
 ## 6. Awsome MCPs
+- AWS MCP Servers Samples https://github.com/aws-samples/aws-mcp-servers-samples
 - https://github.com/punkpeye/awesome-mcp-servers
 - https://github.com/modelcontextprotocol/servers
 - https://www.aimcp.info/en
@@ -384,5 +372,6 @@ docker build -t mcp/aws-kb-retrieval:latest -f src/aws-kb-retrieval-server/Docke
 - https://github.com/xiehust/sample-mcp-servers
 - https://mcp.composio.dev/
 - https://smithery.ai/
+- https://mcp.so/
 
 ## 9. [LICENSE](./LICENSE)

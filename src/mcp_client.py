@@ -127,26 +127,25 @@ class MCPClient:
             env['AWS_SECRET_ACCESS_KEY'] = self.env['AWS_SECRET_ACCESS_KEY']
             env['AWS_REGION'] = self.env['AWS_REGION']
         env.update(server_script_envs)
-
-        server_params = StdioServerParameters(
-            command=command, args=server_script_args, env=env
-        )
-        logger.info(f"\nAdd server %s %s" % (command, server_script_args))
-    
-        stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
-        _stdio, _write = stdio_transport
-        self.session = await self.exit_stack.enter_async_context(ClientSession(_stdio, _write))
-        # logger.info(f"\n{server_id} set_notification_handler")
-        # self.sessions[server_id].set_notification_handler(
-        #     "resources/list_changed", 
-        #     handle_resource_change
-        # )
-        # 主动订阅资源变更
-        # logger.info(f"\n{server_id} subscribe resource")
-        # await session.subscribe(resources=["file:///*"])
+        try: 
+            server_params = StdioServerParameters(
+                command=command, args=server_script_args, env=env
+            )
+        except Exception as e:
+            logger.error(f"\n{e}")
+            raise ValueError(f"Invalid server script or command. {e}")
+        logger.info(f"\nAdding server %s %s" % (command, server_script_args))
         
-        logger.info(f"\n{self.name} session initialize")
-        await self.session.initialize()   
+        try:
+            stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
+            _stdio, _write = stdio_transport
+            self.session = await self.exit_stack.enter_async_context(ClientSession(_stdio, _write))
+            await self.session.initialize()
+            logger.info(f"\n{self.name} session initialize done")
+        except Exception as e:
+            logger.error(f"\n{self.name} session initialize failed: {e}")
+            raise ValueError(f"Invalid server script or command. {e}")    
+        
         try:
  
             resource = await self.session.list_resources()
@@ -156,7 +155,7 @@ class MCPClient:
         # List available tools
         response = await self.session.list_tools()
         tools = response.tools
-        logger.info(f"\nConnected to server [{self.name}] with tools: " + str([tool.name for tool in tools]))
+        logger.info(f"\nConnected to server [{self.name}] with tools: " + str([tool for tool in tools]))
 
     async def get_tool_config(self, model_provider='bedrock', server_id : str = ''):
         """Get llm's tool usage config via MCP server"""
@@ -196,4 +195,14 @@ class MCPClient:
 
     async def cleanup(self):
         """Clean up resources"""
-        await self.exit_stack.aclose()
+        try:
+            await self.exit_stack.aclose()
+        except RuntimeError as e:
+            # Handle the case where exit_stack is being closed in a different task
+            if "Attempted to exit cancel scope in a different task" in str(e):
+                # Create a new exit stack for future use
+                self.exit_stack = AsyncExitStack()
+                logger.warning(f"Handled cross-task exit_stack closure for {self.name}")
+            else:
+                # Re-raise if it's a different error
+                raise
