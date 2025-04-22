@@ -1,0 +1,22 @@
+services:
+  mcpui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mcp-bedrock-ui
+    restart: unless-stopped
+    # 使用host网络模式，直接共享宿主机网络，可以直接访问localhost
+    network_mode: "host"
+    env_file:
+      - .env.local
+    volumes:
+      - ./.env.local:/app/.env.local
+    environment:
+      - NODE_ENV=production
+      - NODE_OPTIONS=--http-parser=legacy --max-http-header-size=16384
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
